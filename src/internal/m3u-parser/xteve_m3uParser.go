@@ -11,128 +11,130 @@ import (
 // MakeInterfaceFromM3U :
 func MakeInterfaceFromM3U(byteStream []byte) (allChannels []interface{}, err error) {
 
-	var content = string(byteStream)
-	var channelName string
-	var uuids []string
+    var content = string(byteStream)
+    var channelName string
+    var uuids []string
 
-	var parseMetaData = func(channel string) (stream map[string]string) {
+    // Precompile regular expressions outside the loop
+    var exceptForParameter = `[a-z-A-Z&=]*(".*?")`
+    var exceptForChannelName = `,([^\n]*|,[^\r]*)`
+    parameterRegexp := regexp.MustCompile(exceptForParameter)
+    channelNameRegexp := regexp.MustCompile(exceptForChannelName)
 
-		stream = make(map[string]string)
-		var exceptForParameter = `[a-z-A-Z&=]*(".*?")`
-		var exceptForChannelName = `,([^\n]*|,[^\r]*)`
-		var lines = strings.Split(strings.Replace(channel, "\r\n", "\n", -1), "\n")
+    var parseMetaData = func(channel string) (stream map[string]string) {
 
-		// Remove lines starting with # and empty lines
-		for i := len(lines) - 1; i >= 0; i-- {
-			if len(lines[i]) == 0 || lines[i][0:1] == "#" {
-				lines = append(lines[:i], lines[i+1:]...)
-			}
-		}
+        stream = make(map[string]string)
+        var lines = strings.Split(strings.Replace(channel, "\r\n", "\n", -1), "\n")
 
-		// URL is always on the second line after #EXTINF
-		if len(lines) >= 2 {
-			stream["url"] = strings.Trim(lines[1], "\r\n")
+        // Remove lines starting with # and empty lines
+        for i := len(lines) - 1; i >= 0; i-- {
+            if len(lines[i]) == 0 || lines[i][0:1] == "#" {
+                lines = append(lines[:i], lines[i+1:]...)
+            }
+        }
 
-			// Parse the first line (#EXTINF line) for metadata
-			var value string
-			var p = regexp.MustCompile(exceptForParameter)
-			var streamParameter = p.FindAllString(lines[0], -1)
-			for _, p := range streamParameter {
-				lines[0] = strings.Replace(lines[0], p, "", 1)
-				p = strings.Replace(p, `"`, "", -1)
-				var parameter = strings.SplitN(p, "=", 2)
-				if len(parameter) == 2 {
-					// Save TVG Key in lowercase
-					if strings.Contains(parameter[0], "tvg") {
-						stream[strings.ToLower(parameter[0])] = parameter[1]
-					} else {
-						stream[parameter[0]] = parameter[1]
-					}
+        // URL is always on the second line after #EXTINF
+        if len(lines) >= 2 {
+            stream["url"] = strings.Trim(lines[1], "\r\n")
 
-					// Do not pass URLs to the filter function
-					if !strings.Contains(parameter[1], "://") && len(parameter[1]) > 0 {
-						value = value + parameter[1] + " "
-					}
-				}
-			}
+            // Parse the first line (#EXTINF line) for metadata
+            var value string
+            var streamParameter = parameterRegexp.FindAllString(lines[0], -1)
+            for _, p := range streamParameter {
+                lines[0] = strings.Replace(lines[0], p, "", 1)
+                p = strings.Replace(p, `"`, "", -1)
+                var parameter = strings.SplitN(p, "=", 2)
+                if len(parameter) == 2 {
+                    // Save TVG Key in lowercase
+                    if strings.Contains(parameter[0], "tvg") {
+                        stream[strings.ToLower(parameter[0])] = parameter[1]
+                    } else {
+                        stream[parameter[0]] = parameter[1]
+                    }
 
-			// Parse channel name
-			n := regexp.MustCompile(exceptForChannelName)
-			var name = n.FindAllString(lines[0], 1)
+                    // Do not pass URLs to the filter function
+                    if !strings.Contains(parameter[1], "://") && len(parameter[1]) > 0 {
+                        value = value + parameter[1] + " "
+                    }
+                }
+            }
 
-			if len(name) > 0 {
-				channelName = name[0]
-				channelName = strings.Replace(channelName, `,`, "", 1)
-				channelName = strings.TrimRight(channelName, "\r\n")
-				channelName = strings.TrimRight(channelName, " ")
-			}
+            // Parse channel name
+            var name = channelNameRegexp.FindAllString(lines[0], 1)
 
-			if len(channelName) == 0 {
-				if v, ok := stream["tvg-name"]; ok {
-					channelName = v
-				}
-			}
+            if len(name) > 0 {
+                channelName = name[0]
+                channelName = strings.Replace(channelName, `,`, "", 1)
+                channelName = strings.TrimRight(channelName, "\r\n")
+                channelName = strings.TrimRight(channelName, " ")
+            }
 
-			// Only generate a new tvg-id if it's missing or blank
-			if stream["tvg-id"] == "" {
-				// Use MD5 hash of the URL as the tvg-id
-				hash := md5.Sum([]byte(stream["url"]))
-				stream["tvg-id"] = fmt.Sprintf("threadfin-%x", hash)
-			}
+            if len(channelName) == 0 {
+                if v, ok := stream["tvg-name"]; ok {
+                    channelName = v
+                }
+            }
 
-			channelName = strings.TrimRight(channelName, " ")
+            // Only generate a new tvg-id if it's missing or blank
+            if stream["tvg-id"] == "" {
+                // Use MD5 hash of the URL as the tvg-id
+                hash := md5.Sum([]byte(stream["url"]))
+                stream["tvg-id"] = fmt.Sprintf("threadfin-%x", hash)
+            }
 
-			// Skip channels without a name
-			if len(channelName) == 0 {
-				return
-			}
+            channelName = strings.TrimRight(channelName, " ")
 
-			stream["name"] = channelName
-			value = value + channelName
-			stream["_values"] = value
-		}
+            // Skip channels without a name
+            if len(channelName) == 0 {
+                return
+            }
 
-		// Search for a unique ID in the stream
-		for key, value := range stream {
-			if strings.Contains(strings.ToLower(key), "tvg-id") {
-				if indexOfString(value, uuids) != -1 {
-					break
-				}
-				uuids = append(uuids, value)
-				stream["_uuid.key"] = key
-				stream["_uuid.value"] = value
-				break
-			}
-		}
+            stream["name"] = channelName
+            value = value + channelName
+            stream["_values"] = value
+        }
 
-		return
-	}
+        // Search for a unique ID in the stream
+        for key, value := range stream {
+            if strings.Contains(strings.ToLower(key), "tvg-id") {
+                if indexOfString(value, uuids) != -1 {
+                    break
+                }
+                uuids = append(uuids, value)
+                stream["_uuid.key"] = key
+                stream["_uuid.value"] = value
+                break
+            }
+        }
 
-	// Check if the content is a valid M3U file
-	if strings.Contains(content, "#EXT-X-TARGETDURATION") || strings.Contains(content, "#EXT-X-MEDIA-SEQUENCE") {
-		err = errors.New("Invalid M3U file, an extended M3U file is required.")
-		return
-	}
+        return
+    }
 
-	if strings.Contains(content, "#EXTM3U") {
-		content = strings.Replace(content, ":-1", "", -1)
-		content = strings.Replace(content, "'", "\"", -1)
-		var channels = strings.Split(content, "#EXTINF")
+    // Check if the content is a valid M3U file
+    if strings.Contains(content, "#EXT-X-TARGETDURATION") || strings.Contains(content, "#EXT-X-MEDIA-SEQUENCE") {
+        err = errors.New("Invalid M3U file, an extended M3U file is required.")
+        return
+    }
 
-		channels = append(channels[:0], channels[1:]...)
+    if strings.Contains(content, "#EXTM3U") {
+        content = strings.Replace(content, ":-1", "", -1)
+        content = strings.Replace(content, "'", "\"", -1)
+        var channels = strings.Split(content, "#EXTINF")
 
-		for _, channel := range channels {
-			var stream = parseMetaData(channel)
-			if len(stream) > 0 && stream != nil {
-				allChannels = append(allChannels, stream)
-			}
-		}
+        channels = append(channels[:0], channels[1:]...)
 
-	} else {
-		err = errors.New("Invalid M3U file, an extended M3U file is required.")
-	}
+        for _, channel := range channels {
+            var stream = parseMetaData(channel)
+            if len(stream) > 0 && stream != nil {
+                allChannels = append(allChannels, stream)
+            }
+        }
 
-	return
+    } else {
+        err = errors.New("Invalid M3U file, an extended M3U file is required.")
+    }
+
+    return
 }
 
 func indexOfString(element string, data []string) int {
